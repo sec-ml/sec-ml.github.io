@@ -1,1 +1,258 @@
-Coming soon.
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>RSS Feed Validator</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            max-width: 600px;
+            margin: 2rem auto;
+        }
+
+        input,
+        button {
+            padding: 0.5rem;
+            font-size: 1rem;
+        }
+
+        .result {
+            margin-top: 1rem;
+        }
+
+        .success {
+            color: green;
+        }
+
+        .error {
+            color: red;
+        }
+
+        pre {
+            background: #f4f4f4;
+            padding: 1rem;
+            overflow-x: auto;
+        }
+
+        .log {
+            font-size: 0.9rem;
+            color: #555;
+            margin-top: 0.5rem;
+        }
+    </style>
+</head>
+
+<!-- ...same HTML head and style... -->
+
+<body>
+    <h1>RSS Feed Validator</h1>
+    <form id="rssForm">
+        <label for="rssUrl">RSS Feed URL:</label><br>
+        <input type="text" id="rssUrl" name="rssUrl" placeholder="http://localhost/feed.xml" size="50" required>
+        <button type="submit">Validate</button>
+    </form>
+    <div class="result" id="result"></div>
+
+    <script>
+        document.getElementById('rssForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const url = document.getElementById('rssUrl').value.trim();
+            const resultDiv = document.getElementById('result');
+            resultDiv.innerHTML = '<div class="log">🔄 Fetching RSS feed...</div>';
+
+            let responseText = "";
+
+            try {
+                let res;
+                try {
+                    res = await fetch(url);
+                } catch (networkErr) {
+                    console.error("Network or CORS error", networkErr);
+                    resultDiv.innerHTML += `
+            <div class="error">❌ Network or CORS Error: ${networkErr.message}</div>
+            <div class="log">🛠️ Tip: If you're accessing a local file or localhost, ensure:
+              <ul>
+                <li>The server is running and accessible at <code>${url}</code></li>
+                <li>The feed allows CORS requests (e.g., has <code>Access-Control-Allow-Origin: *</code>)</li>
+                <li>You’re not trying to fetch <code>file://</code> URLs (not allowed in browser JS)</li>
+              </ul>
+            </div>
+          `;
+                    return;
+                }
+
+                if (!res.ok) throw new Error(`HTTP Error: ${res.status} ${res.statusText}`);
+
+                responseText = await res.text();
+                if (!responseText.trim()) throw new Error('Feed is empty or blank.');
+
+                resultDiv.innerHTML += '<div class="log">✅ Fetched feed successfully. Parsing XML...</div>';
+
+                const parser = new DOMParser();
+                const xml = parser.parseFromString(responseText, "application/xml");
+
+                const parserError = xml.querySelector("parsererror");
+                if (parserError) {
+                    const errorText = parserError.textContent.replace(/\n/g, '<br>');
+                    resultDiv.innerHTML += `<div class="error">❌ Invalid XML:<br>${errorText}</div>`;
+                    return;
+                }
+
+                const rss = xml.querySelector("rss");
+                const channel = xml.querySelector("channel");
+
+                if (!rss) {
+                    resultDiv.innerHTML += `<div class="error">❌ Missing &lt;rss&gt; root element.</div>`;
+                    return;
+                }
+
+                if (!channel) {
+                    resultDiv.innerHTML += `<div class="error">❌ Missing &lt;channel&gt; element inside &lt;rss&gt;.</div>`;
+                    return;
+                }
+
+                const title = channel.querySelector("title")?.textContent || "Unknown Title";
+
+                // Validation helpers
+                function check(tag, parent = channel) {
+                    return !!parent?.querySelector(tag);
+                }
+
+                function checkExamples(tag, parent, exactMatch = false) {
+                    let selector = exactMatch ? `:scope > ${tag}` : tag;
+                    const nodes = Array.from(parent?.querySelectorAll(selector) || []);
+                    return {
+                        present: nodes.length > 0,
+                        nodes
+                    };
+                }
+
+                function checklistItem({ tag, label, parent, required = false, exact = false }) {
+                    const { present, nodes } = checkExamples(tag, parent, exact);
+                    const symbol = present ? '✅' : (required ? '❌' : '⚠️');
+                    const level = present
+                        ? 'Present'
+                        : required
+                            ? 'Missing (required)'
+                            : 'Missing (optional)';
+                    const summaryId = `${tag.replace(/[^\w]/g, '')}_${Math.random().toString(36).slice(2)}`;
+
+                    const exampleHtml = present
+                        ? nodes.map(node => `<pre>${escapeHtml(node.outerHTML)}</pre>`).join('')
+                        : `<div style="color:#888">No <code>&lt;${tag}&gt;</code> element found.</div>`;
+
+                    return `
+    <li>
+      <details>
+        <summary><span>${symbol}</span> <code>${label}</code> <span style="color: #888">— ${level}</span></summary>
+        ${exampleHtml}
+      </details>
+    </li>
+  `;
+                }
+
+                // <channel> checklist — use :scope to avoid pulling from inside <item>
+                const channelChecklist = [
+                    checklistItem({ tag: "title", label: "title", required: true, parent: channel, exact: true }),
+                    checklistItem({ tag: "link", label: "link", required: true, parent: channel, exact: true }),
+                    checklistItem({ tag: "description", label: "description", required: true, parent: channel, exact: true }),
+                    checklistItem({ tag: "language", label: "language", parent: channel, exact: true }),
+                    checklistItem({ tag: "pubDate", label: "pubDate", parent: channel, exact: true }),
+                    checklistItem({ tag: "lastBuildDate", label: "lastBuildDate", parent: channel, exact: true }),
+                    checklistItem({ tag: "generator", label: "generator", parent: channel, exact: true }),
+                    checklistItem({ tag: "image", label: "image", parent: channel, exact: true }),
+                ];
+
+                // <item> checklist — loop through all items and check each
+                const items = Array.from(xml.querySelectorAll("channel > item"));
+
+                const itemChecklist = items.length
+                    ? items.map((item, i) => {
+                        const checks = [
+                            checklistItem({ tag: "title", label: "title", parent: item, required: false, exact: true }),
+                            checklistItem({ tag: "link", label: "link", parent: item, required: false, exact: true }),
+                            checklistItem({ tag: "description", label: "description", parent: item, required: false, exact: true }),
+                            checklistItem({ tag: "pubDate", label: "pubDate", parent: item, exact: true }),
+                            checklistItem({ tag: "guid", label: "guid", parent: item, exact: true }),
+                        ].join('');
+
+                        return `
+        <li>
+          <details>
+            <summary>📝 <strong>Item ${i + 1}</strong></summary>
+            <ul>${checks}</ul>
+          </details>
+        </li>
+      `;
+                    })
+                    : [`<li>❌ <code>&lt;item&gt;</code> — Missing (required)</li>`];
+
+
+
+                resultDiv.innerHTML += `
+  <div class="success">✅ Valid RSS Feed</div>
+  <strong>Title:</strong> ${title}
+
+  <details open>
+    <summary>🧾 Checklist: <code>&lt;channel&gt;</code> elements</summary>
+    <ul>${channelChecklist.join("")}</ul>
+  </details>
+
+  <details open>
+    <summary>🧾 Checklist: <code>&lt;item&gt;</code> elements (first item)</summary>
+    <ul>${itemChecklist.join("")}</ul>
+  </details>
+
+  <details>
+    <summary>View Raw XML</summary>
+    <pre>${escapeHtml(formatXml(responseText))}</pre>
+  </details>
+`;
+
+
+            } catch (err) {
+                console.error("Unexpected error during validation", err);
+                resultDiv.innerHTML += `<div class="error">❌ Error: ${err.message}</div>`;
+            }
+        });
+
+        function escapeHtml(str) {
+            return str.replace(/[&<>"']/g, (m) => ({
+                '&': '&amp;', '<': '&lt;', '>': '&gt;',
+                '"': '&quot;', "'": '&#39;'
+            }[m]));
+        }
+
+
+        function formatXml(xml) {
+                const PADDING = '  '; // 2 spaces
+                const reg = /(>)(<)(\/*)/g;
+                xml = xml.replace(reg, '$1\n$2$3'); // add line breaks between tags
+
+                const lines = xml.split('\n');
+                let indent = 0;
+                let formatted = [];
+
+                for (let line of lines) {
+                    line = line.trim();
+                    if (line.match(/^<\/.+>/)) {
+                        indent--;
+                    }
+
+                    const padding = PADDING.repeat(indent);
+                    formatted.push(padding + line);
+
+                    if (line.match(/^<[^!?][^>]*[^/]?>$/) && !line.startsWith('</')) {
+                        indent++;
+                    }
+                }
+
+                return formatted.join('\n');
+            }
+
+    </script>
+</body>
+
+
+</html>
